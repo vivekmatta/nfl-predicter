@@ -1,0 +1,23 @@
+# Python Virtual Environments
+venv/
+.venv/
+env/
+
+# Python compiled files
+__pycache__/
+*.pyc
+
+# Operating System Files
+.DS_Store
+Thumbs.db
+
+# Large Data & Machine Learning Artifacts
+*.pkl
+*.json
+model.h5
+*.csv # <-- WARNING: Uncomment this ONLY if you keep your CSVs outside of Git. 
+      # Since you uploaded your data, keep this line commented out if you want 
+      # to keep tracking the stats files.
+
+# Environment Secrets
+.env
