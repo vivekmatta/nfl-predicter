@@ -1,29 +1,83 @@
-import pandas as pd
-import numpy as np
+import os
 from pathlib import Path
-from collections import Counter
+from typing import Dict, Tuple, Any, Optional
 
+import numpy as np
+import pandas as pd
+import requests
+
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.linear_model import LogisticRegression
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.pipeline import Pipeline
-from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix
 
+# =========================================================
+# CONFIG: paths
+# =========================================================
 
-# ---------------------------------------------------------
-# CONFIG
-# ---------------------------------------------------------
 BASE_DIR = Path(r"C:\Users\Vhas21\Desktop\Northwestern\Projects\nfl-predicter")
 RAW_CSV = BASE_DIR / "spreadspoke_scores.csv"
 
+# =========================================================
+# CONFIG: WeatherAPI
+# =========================================================
 
-# ---------------------------------------------------------
-# 1. Data cleaning / feature engineering
-# ---------------------------------------------------------
+WEATHER_API_KEY = os.getenv(
+    "WEATHERAPI_KEY",
+    "e685133506aa435ab9252438250612"  # your key as fallback
+)
+WEATHER_BASE_URL = "http://api.weatherapi.com/v1/current.json"
+
+TEAM_ABBR_TO_CITY: Dict[str, str] = {
+    "ARI": "Glendale,AZ",
+    "ATL": "Atlanta,GA",
+    "BAL": "Baltimore,MD",
+    "BUF": "Buffalo,NY",
+    "CAR": "Charlotte,NC",
+    "CHI": "Chicago,IL",
+    "CIN": "Cincinnati,OH",
+    "CLE": "Cleveland,OH",
+    "DAL": "Dallas,TX",
+    "DEN": "Denver,CO",
+    "DET": "Detroit,MI",
+    "GB": "Green Bay,WI",
+    "HOU": "Houston,TX",
+    "IND": "Indianapolis,IN",
+    "JAX": "Jacksonville,FL",
+    "KC": "Kansas City,MO",
+    "LAC": "Inglewood,CA",
+    "LAR": "Inglewood,CA",
+    "LV": "Las Vegas,NV",
+    "MIA": "Miami,FL",
+    "MIN": "Minneapolis,MN",
+    "NE": "Foxborough,MA",
+    "NO": "New Orleans,LA",
+    "NYG": "East Rutherford,NJ",
+    "NYJ": "East Rutherford,NJ",
+    "PHI": "Philadelphia,PA",
+    "PIT": "Pittsburgh,PA",
+    "SEA": "Seattle,WA",
+    "SF": "Santa Clara,CA",
+    "TB": "Tampa,FL",
+    "TEN": "Nashville,TN",
+    "WAS": "Landover,MD",
+    # Legacy
+    "OAK": "Oakland,CA",
+    "SD": "San Diego,CA",
+    "STL": "St. Louis,MO",
+}
+
+# Teams with domes / mostly indoor
+DOME_TEAMS = {
+    "ATL", "DET", "MIN", "NO", "DAL", "HOU", "IND", "ARI", "LV", "LAC", "LAR"
+}
+
+# =========================================================
+# Data cleaning
+# =========================================================
 
 def week_to_num(x):
-    """Map schedule_week to a numeric value."""
     try:
         return int(x)
     except Exception:
@@ -38,66 +92,40 @@ def week_to_num(x):
         return mapping.get(str(x), 0)
 
 
-def clean_for_model(df: pd.DataFrame):
-    """
-    Clean raw spreadspoke_scores.csv and return:
-      - cleaned_df: numeric features + home_win label
-      - team_to_id: mapping FULL team name -> id (for training)
-      - fav_to_id: mapping favorite team abbrev -> id (0 = pick'em)
-      - abbr_to_team_name: mapping abbrev like 'BUF' -> full team name
-      - team_default_stadium_id: mapping full team name -> most common stadium_id
-      - feature_cols: list of feature column names
-      - feature_medians: median value per feature (for default/empty inputs)
-      - default_season: most recent season in dataset
-    """
+def clean_for_model(df: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, int], Dict[str, int]]:
     df = df.copy()
 
-    # Keep only rows with scores (needed to define label)
+    # Need scores to define label
     df = df.dropna(subset=["score_home", "score_away"])
-
-    # Label: 1 if home team wins, 0 otherwise
     df["point_diff"] = df["score_home"] - df["score_away"]
     df["home_win"] = (df["point_diff"] > 0).astype(int)
 
     # Date features
     df["schedule_date_dt"] = pd.to_datetime(df["schedule_date"], errors="coerce")
     df["game_month"] = df["schedule_date_dt"].dt.month
-    df["game_dow"] = df["schedule_date_dt"].dt.weekday  # 0=Mon ... 6=Sun
+    df["game_dow"] = df["schedule_date_dt"].dt.weekday
 
     # Week + playoff
     df["schedule_week_num"] = df["schedule_week"].apply(week_to_num)
     df["is_playoff"] = df["schedule_playoff"].astype(int)
 
-    # ---- Team IDs (full names) ----
+    # Encode teams
     teams = sorted(set(df["team_home"].unique()) | set(df["team_away"].unique()))
     team_to_id = {name: i + 1 for i, name in enumerate(teams)}
-
     df["home_team_id"] = df["team_home"].map(team_to_id)
     df["away_team_id"] = df["team_away"].map(team_to_id)
 
-    # ---- Build abbrev -> full team name map (BUF -> Buffalo Bills) ----
-    abbr_to_team_name: dict[str, str] = {}
-    for _, row in df.loc[~df["team_favorite_id"].isin(["PICK", "PK"])].iterrows():
-        abbr = row["team_favorite_id"]
-        if pd.isna(abbr):
-            continue
-        if abbr not in abbr_to_team_name:
-            # Use the home team name for that abbreviation (good enough for mapping)
-            abbr_to_team_name[abbr] = row["team_home"]
-
-    # Favorite team IDs (based on abbrevs like BUF, NE, KC, etc.)
-    fav_series = df["team_favorite_id"].dropna()
+    # Encode favorite
     fav_vals = sorted(
-        v for v in fav_series.unique()
+        v for v in df["team_favorite_id"].dropna().unique()
         if v not in ["PICK", "PK"]
     )
     fav_to_id = {name: i + 1 for i, name in enumerate(fav_vals)}
-
     df["favorite_team_id"] = df["team_favorite_id"].map(fav_to_id)
     df.loc[df["team_favorite_id"].isin(["PICK", "PK"]), "favorite_team_id"] = 0
     df["favorite_team_id"] = df["favorite_team_id"].fillna(0).astype(int)
 
-    # Numeric betting + weather columns
+    # Numeric betting + weather
     for col in [
         "spread_favorite",
         "over_under_line",
@@ -107,7 +135,7 @@ def clean_for_model(df: pd.DataFrame):
     ]:
         df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    # Implied points from Vegas line
+    # Implied points
     df["fav_implied_pts"] = np.where(
         df["spread_favorite"].notna() & df["over_under_line"].notna(),
         df["over_under_line"] / 2 - df["spread_favorite"] / 2,
@@ -126,21 +154,13 @@ def clean_for_model(df: pd.DataFrame):
     df["stadium_id"] = df["stadium"].map(stadium_to_id).fillna(0).astype(int)
     df["stadium_neutral"] = df["stadium_neutral"].astype(int)
 
-    # Default stadium per home team (most common stadium)
-    team_default_stadium_id: dict[str, int] = {}
-    for team_name, sub in df.groupby("team_home"):
-        counts = Counter(sub["stadium_id"])
-        if counts:
-            most_common_id, _ = counts.most_common(1)[0]
-            team_default_stadium_id[team_name] = int(most_common_id)
-
-    # Weather flags from text
+    # Weather detail flags
     wd = df["weather_detail"].fillna("").str.lower()
     df["is_indoor"] = (wd.str.contains("indoor") | wd.str.contains("dome")).astype(int)
     df["is_rain"] = wd.str.contains("rain").astype(int)
     df["is_snow"] = wd.str.contains("snow").astype(int)
 
-    feature_cols = [
+    cols = [
         "schedule_season",
         "schedule_week_num",
         "is_playoff",
@@ -162,469 +182,455 @@ def clean_for_model(df: pd.DataFrame):
         "is_indoor",
         "is_rain",
         "is_snow",
+        "home_win",
     ]
 
-    cleaned = df[feature_cols + ["home_win"]].copy()
+    cleaned = df[cols].copy()
 
     # Fill NaNs with column medians
-    feature_medians = cleaned[feature_cols].median().to_dict()
-    for col in feature_cols:
-        cleaned[col] = cleaned[col].fillna(feature_medians[col])
+    for col in cleaned.columns:
+        if cleaned[col].dtype.kind in "biufc":
+            median_val = cleaned[col].median()
+            cleaned[col] = cleaned[col].fillna(median_val)
 
-    default_season = int(cleaned["schedule_season"].max())
+    return cleaned, team_to_id, stadium_to_id
 
-    return (
-        cleaned,
-        team_to_id,
-        fav_to_id,
-        abbr_to_team_name,
-        team_default_stadium_id,
-        feature_cols,
-        feature_medians,
-        default_season,
-    )
+# =========================================================
+# Weather helpers
+# =========================================================
 
-
-# ---------------------------------------------------------
-# 2. Training models
-# ---------------------------------------------------------
-
-def train_models(cleaned_df: pd.DataFrame, feature_cols):
-    """Train Logistic Regression and Random Forest, return best one."""
-    X = cleaned_df[feature_cols].values
-    y = cleaned_df["home_win"].values
-
-    # Random split; you can change to season-based later if you want
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-
-    # Logistic Regression pipeline
-    logreg = Pipeline([
-        ("scaler", StandardScaler()),
-        ("clf", LogisticRegression(max_iter=200, n_jobs=-1)),
-    ])
-
-    # Random Forest
-    rf = Pipeline([
-        ("clf", RandomForestClassifier(
-            n_estimators=300,
-            max_depth=None,
-            min_samples_split=10,
-            min_samples_leaf=5,
-            random_state=42,
-            n_jobs=-1
-        ))
-    ])
-
-    models = {
-        "logreg": logreg,
-        "rf": rf,
+def fetch_weather_for_city(city_q: str) -> Dict[str, Any]:
+    params = {
+        "key": WEATHER_API_KEY,
+        "q": city_q,
+        "aqi": "no",
+    }
+    resp = requests.get(WEATHER_BASE_URL, params=params, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    if isinstance(data, dict) and "error" in data:
+        err = data["error"]
+        raise RuntimeError(f"WeatherAPI error {err.get('code')}: {err.get('message')}")
+    cur = data["current"]
+    cond = cur.get("condition", {})
+    return {
+        "temp_f": cur.get("temp_f"),
+        "wind_mph": cur.get("wind_mph"),
+        "humidity": cur.get("humidity"),
+        "condition_text": cond.get("text", ""),
     }
 
-    best_model = None
-    best_acc = -1.0
 
-    for name, model in models.items():
-        print(f"\nTraining {name}...")
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        y_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, "predict_proba") else None
+def infer_rain_snow_from_condition(condition_text: str) -> Tuple[int, int]:
+    text = (condition_text or "").lower()
+    is_rain = int(
+        "rain" in text
+        or "drizzle" in text
+        or "shower" in text
+        or "thunderstorm" in text
+    )
+    is_snow = int(
+        "snow" in text
+        or "sleet" in text
+        or "blizzard" in text
+        or "flurries" in text
+    )
+    return is_rain, is_snow
 
-        acc = accuracy_score(y_test, y_pred)
-        print(f"{name} accuracy: {acc:.3f}")
+# =========================================================
+# Training (with scaling for logistic regression)
+# =========================================================
 
-        if y_proba is not None:
-            auc = roc_auc_score(y_test, y_proba)
-            print(f"{name} ROC AUC: {auc:.3f}")
+def train_models(cleaned: pd.DataFrame):
+    X = cleaned.drop(columns=["home_win"])
+    y = cleaned["home_win"].values
 
-        cm = confusion_matrix(y_test, y_pred)
-        print(f"{name} confusion matrix:\n{cm}\n")
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y,
+        test_size=0.25,
+        random_state=42,
+        stratify=y
+    )
 
-        if acc > best_acc:
-            best_acc = acc
-            best_model = model
+    print("\n==================== TRAINING SUMMARY ====================")
 
-    print(f"Best model: {best_model.steps[-1][0]} with accuracy {best_acc:.3f}")
-    return best_model
+    # ---- Scale features for logistic regression ----
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+    X_test_scaled = scaler.transform(X_test)
+
+    # ---- Logistic Regression ----
+    print("\n[1] Logistic Regression (scaled features)")
+    logreg = LogisticRegression(
+        max_iter=5000,   # more iterations so it converges
+        n_jobs=-1,
+        solver="lbfgs"
+    )
+    logreg.fit(X_train_scaled, y_train)
+    y_pred_lr = logreg.predict(X_test_scaled)
+    y_prob_lr = logreg.predict_proba(X_test_scaled)[:, 1]
+    acc_lr = accuracy_score(y_test, y_pred_lr)
+    auc_lr = roc_auc_score(y_test, y_prob_lr)
+    cm_lr = confusion_matrix(y_test, y_pred_lr)
+    print(f"  • Accuracy : {acc_lr:.3f}")
+    print(f"  • ROC AUC  : {auc_lr:.3f}")
+    print("  • Confusion matrix:\n", cm_lr)
+
+    # ---- Random Forest (unscaled) ----
+    print("\n[2] Random Forest (raw features)")
+    rf = RandomForestClassifier(
+        n_estimators=300,
+        max_depth=None,
+        min_samples_split=10,
+        min_samples_leaf=5,
+        n_jobs=-1,
+        random_state=42,
+    )
+    rf.fit(X_train, y_train)
+    y_pred_rf = rf.predict(X_test)
+    y_prob_rf = rf.predict_proba(X_test)[:, 1]
+    acc_rf = accuracy_score(y_test, y_pred_rf)
+    auc_rf = roc_auc_score(y_test, y_prob_rf)
+    cm_rf = confusion_matrix(y_test, y_pred_rf)
+    print(f"  • Accuracy : {acc_rf:.3f}")
+    print(f"  • ROC AUC  : {auc_rf:.3f}")
+    print("  • Confusion matrix:\n", cm_rf)
+
+    # ---- Comparison table ----
+    print("\n---------------- MODEL COMPARISON ----------------")
+    print(f"{'Model':<18}{'Accuracy':>10}{'ROC AUC':>10}")
+    print("-" * 38)
+    print(f"{'LogisticRegression':<18}{acc_lr:>10.3f}{auc_lr:>10.3f}")
+    print(f"{'RandomForest':<18}{acc_rf:>10.3f}{auc_rf:>10.3f}")
+    print("--------------------------------------------------")
+
+    # Pick best by accuracy
+    if acc_rf >= acc_lr:
+        print(f"\n➡ Best model: RandomForest (accuracy {acc_rf:.3f})")
+        best_model = rf
+        best_scaler: Optional[StandardScaler] = None  # RF uses raw features
+        best_name = "RandomForest"
+    else:
+        print(f"\n➡ Best model: LogisticRegression (accuracy {acc_lr:.3f})")
+        best_model = logreg
+        best_scaler = scaler
+        best_name = "LogisticRegression"
+
+    print("==========================================================\n")
+    return best_model, X.columns.tolist(), best_scaler, best_name
+
+# =========================================================
+# CLI + feature construction
+# =========================================================
+
+def build_team_name_lookup(raw_df: pd.DataFrame) -> Dict[str, str]:
+    """Map user inputs (abbr or lowercase full name) -> canonical full name."""
+    name_to_full: Dict[str, str] = {}
+
+    for name in pd.concat([raw_df["team_home"], raw_df["team_away"]]).dropna().unique():
+        key = str(name).lower()
+        name_to_full[key] = name
+
+    for abbr, full_name in raw_df[["team_favorite_id", "team_home"]].dropna().drop_duplicates().values:
+        key = str(abbr).lower()
+        if key not in name_to_full:
+            name_to_full[key] = full_name
+
+    return name_to_full
 
 
-# ---------------------------------------------------------
-# 3. Prediction helpers
-# ---------------------------------------------------------
+def resolve_team_fullname(user_input: str, name_lookup: Dict[str, str]) -> str:
+    key = user_input.strip().lower()
+    if key not in name_lookup:
+        raise ValueError(f"Unknown team: {user_input}")
+    return name_lookup[key]
 
-def get_team_id(code: str, team_to_id: dict, abbr_to_team_name: dict) -> int:
-    """
-    Accept either a full team name (as in dataset) or an abbreviation like 'BUF'.
-    Returns the team_id used for training.
-    """
-    if code in team_to_id:
-        return team_to_id[code]
 
-    if code in abbr_to_team_name:
-        full_name = abbr_to_team_name[code]
-        return team_to_id[full_name]
+def input_with_default(prompt: str, default: str) -> str:
+    s = input(f"{prompt} [{default}]: ").strip()
+    return s if s else default
 
-    raise KeyError(f"Unknown team code or name: {code}")
+
+def prompt_for_game_details(
+    team_name_lookup: Dict[str, str],
+    team_to_id: Dict[str, int],
+    default_season: int,
+) -> Dict[str, Any]:
+    print("=============== ENTER GAME DETAILS ===============")
+    home_raw = input("Home team (abbr or full name): ").strip()
+    away_raw = input("Away team (abbr or full name): ").strip()
+
+    home_full = resolve_team_fullname(home_raw, team_name_lookup)
+    away_full = resolve_team_fullname(away_raw, team_name_lookup)
+
+    home_abbr_guess = home_raw.upper()
+    away_abbr_guess = away_raw.upper()
+
+    print("\n———— Game context ————")
+    season_str = input_with_default("Season (year)", str(default_season))
+    season = int(season_str)
+
+    week_str = input_with_default("Week number", "8")
+    week_num = int(week_str)
+
+    playoff_str = input_with_default("Is this a playoff game? [y/n]", "n")
+    is_playoff = 1 if playoff_str.lower().startswith("y") else 0
+
+    month_str = input_with_default("Game month (1-12)", "11")
+    game_month = int(month_str)
+
+    dow_str = input_with_default("Day of week (0=Mon ... 6=Sun)", "6")
+    game_dow = int(dow_str)
+
+    print("\n———— Betting ————")
+    spread_str = input_with_default(
+        "Spread for FAVORITE (home negative, away positive)", "-4.5"
+    )
+    spread_fav = float(spread_str)
+
+    ou_str = input_with_default("Over/under total points", "42.0")
+    over_under = float(ou_str)
+
+    fav_team_input = input_with_default(
+        "Favorite team abbreviation (or leave blank for home)",
+        home_abbr_guess if home_abbr_guess else "",
+    ).strip().upper()
+    if fav_team_input == "":
+        favorite_abbr = home_abbr_guess
+    else:
+        favorite_abbr = fav_team_input
+
+    print("\n———— Weather ————")
+    weather_temperature = None
+    weather_wind_mph = None
+    weather_humidity = None
+    is_rain_auto = 0
+    is_snow_auto = 0
+
+    city_q = TEAM_ABBR_TO_CITY.get(home_abbr_guess)
+    if city_q and WEATHER_API_KEY:
+        try:
+            print(f"[INFO] Fetching live weather for {city_q} via WeatherAPI...")
+            w = fetch_weather_for_city(city_q)
+            weather_temperature = float(w["temp_f"]) if w["temp_f"] is not None else None
+            weather_wind_mph = float(w["wind_mph"]) if w["wind_mph"] is not None else None
+            weather_humidity = float(w["humidity"]) if w["humidity"] is not None else None
+            is_rain_auto, is_snow_auto = infer_rain_snow_from_condition(w["condition_text"])
+            print(
+                f"  • Temp: {weather_temperature} F\n"
+                f"  • Wind: {weather_wind_mph} mph\n"
+                f"  • Hum : {weather_humidity}%\n"
+                f"  • Cond: {w['condition_text']}"
+            )
+        except Exception as e:
+            print(f"[WARN] Could not fetch weather automatically: {e}")
+            print("[WARN] Falling back to manual weather input.")
+
+    if weather_temperature is None:
+        temp_str = input_with_default("Temperature (F)", "62.0")
+        weather_temperature = float(temp_str)
+
+    if weather_wind_mph is None:
+        wind_str = input_with_default("Wind speed (mph)", "8.0")
+        weather_wind_mph = float(wind_str)
+
+    if weather_humidity is None:
+        hum_str = input_with_default("Humidity (%)", "69.0")
+        weather_humidity = float(hum_str)
+
+    default_indoor = "y" if home_abbr_guess in DOME_TEAMS else "n"
+    indoor_str = input_with_default(
+        "Is this game indoors / in a dome? [y/n]", default_indoor
+    )
+    is_indoor = 1 if indoor_str.lower().startswith("y") else 0
+
+    rain_str = input_with_default(
+        "Is it raining? [y/n]", "y" if is_rain_auto else "n"
+    )
+    is_rain = 1 if rain_str.lower().startswith("y") else 0
+
+    snow_str = input_with_default(
+        "Is it snowing? [y/n]", "y" if is_snow_auto else "n"
+    )
+    is_snow = 1 if snow_str.lower().startswith("y") else 0
+
+    print("===================================================\n")
+
+    return {
+        "home_full": home_full,
+        "away_full": away_full,
+        "home_abbr": home_abbr_guess,
+        "away_abbr": away_abbr_guess,
+        "favorite_abbr": favorite_abbr,
+        "season": season,
+        "week_num": week_num,
+        "is_playoff": is_playoff,
+        "game_month": game_month,
+        "game_dow": game_dow,
+        "spread_fav": spread_fav,
+        "over_under": over_under,
+        "weather_temperature": weather_temperature,
+        "weather_wind_mph": weather_wind_mph,
+        "weather_humidity": weather_humidity,
+        "is_indoor": is_indoor,
+        "is_rain": is_rain,
+        "is_snow": is_snow,
+    }
 
 
 def build_feature_vector(
-    season,
-    week_num,
-    is_playoff,
-    game_month,
-    game_dow,
-    home_team_code,
-    away_team_code,
-    favorite_team_abbr,
-    spread_favorite,
-    over_under_line,
-    stadium_id,
-    stadium_neutral,
-    temp_f,
-    wind_mph,
-    humidity,
-    is_indoor,
-    is_rain,
-    is_snow,
-    team_to_id,
-    fav_to_id,
-    abbr_to_team_name,
-    feature_cols,
-):
-    """
-    Build a single feature row (1 x n_features) in the same order as training.
-    """
-    home_team_id = get_team_id(home_team_code, team_to_id, abbr_to_team_name)
-    away_team_id = get_team_id(away_team_code, team_to_id, abbr_to_team_name)
+    user_inputs: Dict[str, Any],
+    team_to_id: Dict[str, int],
+    favorite_abbr_to_id: Dict[str, int],
+    stadium_to_id: Dict[str, int],
+    feature_order: list,
+) -> Dict[str, float]:
+    home_id = team_to_id[user_inputs["home_full"]]
+    away_id = team_to_id[user_inputs["away_full"]]
 
-    # Favorite team ID
-    if not favorite_team_abbr:
-        favorite_team_id = 0
-    elif favorite_team_abbr in ["PICK", "PK"]:
-        favorite_team_id = 0
-    else:
-        favorite_team_id = fav_to_id.get(favorite_team_abbr, 0)
+    fav_id = favorite_abbr_to_id.get(user_inputs["favorite_abbr"], 0)
 
-    abs_spread = abs(spread_favorite)
-    fav_implied_pts = over_under_line / 2 - spread_favorite / 2
-    dog_implied_pts = over_under_line / 2 + spread_favorite / 2
+    spread_fav = user_inputs["spread_fav"]
+    over_under = user_inputs["over_under"]
+    fav_implied = over_under / 2 - spread_fav / 2
+    dog_implied = over_under / 2 + spread_fav / 2
+    abs_spread = abs(spread_fav)
 
-    row = {
-        "schedule_season": season,
-        "schedule_week_num": week_num,
-        "is_playoff": int(is_playoff),
-        "game_month": game_month,
-        "game_dow": game_dow,
-        "home_team_id": home_team_id,
-        "away_team_id": away_team_id,
-        "favorite_team_id": favorite_team_id,
-        "spread_favorite": spread_favorite,
+    # For now, we don't try to pick a specific stadium; use 0 and non-neutral.
+    stadium_id = 0
+    stadium_neutral = 0
+
+    feat = {
+        "schedule_season": user_inputs["season"],
+        "schedule_week_num": user_inputs["week_num"],
+        "is_playoff": user_inputs["is_playoff"],
+        "game_month": user_inputs["game_month"],
+        "game_dow": user_inputs["game_dow"],
+        "home_team_id": home_id,
+        "away_team_id": away_id,
+        "favorite_team_id": fav_id,
+        "spread_favorite": spread_fav,
         "abs_spread": abs_spread,
-        "over_under_line": over_under_line,
-        "fav_implied_pts": fav_implied_pts,
-        "dog_implied_pts": dog_implied_pts,
+        "over_under_line": over_under,
+        "fav_implied_pts": fav_implied,
+        "dog_implied_pts": dog_implied,
         "stadium_id": stadium_id,
-        "stadium_neutral": int(stadium_neutral),
-        "weather_temperature": temp_f,
-        "weather_wind_mph": wind_mph,
-        "weather_humidity": humidity,
-        "is_indoor": int(is_indoor),
-        "is_rain": int(is_rain),
-        "is_snow": int(is_snow),
+        "stadium_neutral": stadium_neutral,
+        "weather_temperature": user_inputs["weather_temperature"],
+        "weather_wind_mph": user_inputs["weather_wind_mph"],
+        "weather_humidity": user_inputs["weather_humidity"],
+        "is_indoor": user_inputs["is_indoor"],
+        "is_rain": user_inputs["is_rain"],
+        "is_snow": user_inputs["is_snow"],
     }
 
-    # Ensure order matches feature_cols
-    features = np.array([[row[col] for col in feature_cols]], dtype=float)
-    return features
+    # Ensure all required features exist
+    for col in feature_order:
+        if col not in feat:
+            feat[col] = 0.0
+
+    return {col: float(feat[col]) for col in feature_order}
 
 
 def predict_game(
     model,
-    team_to_id,
-    fav_to_id,
-    abbr_to_team_name,
-    team_default_stadium_id,
-    feature_cols,
-    feature_medians,
-    season,
-    week_num,
-    is_playoff,
-    game_month,
-    game_dow,
-    home_team_code,
-    away_team_code,
-    favorite_team_abbr,
-    spread_favorite,
-    over_under_line,
-    temp_f,
-    wind_mph,
-    humidity,
-    is_indoor,
-    is_rain,
-    is_snow,
-):
-    """
-    High-level helper: returns predicted winner + probability of home win.
-    Auto-fills stadium_id from home team if possible.
-    """
-    # Default stadium = home team's usual stadium
-    try:
-        full_home_name = abbr_to_team_name.get(home_team_code, home_team_code)
-        stadium_id = team_default_stadium_id.get(full_home_name, 0)
-        stadium_neutral = 0
-    except Exception:
-        stadium_id = 0
-        stadium_neutral = 1
-
-    x = build_feature_vector(
-        season,
-        week_num,
-        is_playoff,
-        game_month,
-        game_dow,
-        home_team_code,
-        away_team_code,
-        favorite_team_abbr,
-        spread_favorite,
-        over_under_line,
-        stadium_id,
-        stadium_neutral,
-        temp_f,
-        wind_mph,
-        humidity,
-        is_indoor,
-        is_rain,
-        is_snow,
-        team_to_id,
-        fav_to_id,
-        abbr_to_team_name,
-        feature_cols,
+    user_inputs: Dict[str, Any],
+    team_to_id: Dict[str, int],
+    favorite_abbr_to_id: Dict[str, int],
+    stadium_to_id: Dict[str, int],
+    feature_order: list,
+    scaler_for_best: Optional[StandardScaler],
+) -> Tuple[bool, float]:
+    feat_dict = build_feature_vector(
+        user_inputs,
+        team_to_id=team_to_id,
+        favorite_abbr_to_id=favorite_abbr_to_id,
+        stadium_to_id=stadium_to_id,
+        feature_order=feature_order,
     )
 
-    proba = model.predict_proba(x)[0, 1]
-    home_win = proba >= 0.5
-    predicted_winner = home_team_code if home_win else away_team_code
-    return predicted_winner, float(proba)
+    x_df = pd.DataFrame([feat_dict], columns=feature_order)
 
-
-# ---------------------------------------------------------
-# 4. Simple, organized CLI UI
-# ---------------------------------------------------------
-
-def ask_str(prompt, default=None):
-    """Ask for a string, allow empty = use default."""
-    if default is not None:
-        txt = input(f"{prompt} [{default}]: ").strip()
-        return txt if txt != "" else default
+    # If best model is logistic regression, we need to scale here
+    if scaler_for_best is not None:
+        x_scaled = scaler_for_best.transform(x_df.values)
+        proba = model.predict_proba(x_scaled)[0, 1]
     else:
-        return input(f"{prompt}: ").strip()
+        # RandomForest path: use raw features (DataFrame is fine)
+        proba = model.predict_proba(x_df)[0, 1]
 
+    predicted_home_win = proba >= 0.5
+    return predicted_home_win, float(proba)
 
-def ask_int(prompt, default=None):
-    """Ask for int, allow empty = use default."""
-    while True:
-        if default is not None:
-            txt = input(f"{prompt} [{default}]: ").strip()
-            if txt == "":
-                return int(default)
-        else:
-            txt = input(f"{prompt}: ").strip()
-            if txt == "":
-                print("Please enter a number or Ctrl+C to exit.")
-                continue
-        try:
-            return int(txt)
-        except ValueError:
-            print("Not a valid integer, try again.")
-
-
-def ask_float(prompt, default=None):
-    """Ask for float, allow empty = use default."""
-    while True:
-        if default is not None:
-            txt = input(f"{prompt} [{default}]: ").strip()
-            if txt == "":
-                return float(default)
-        else:
-            txt = input(f"{prompt}: ").strip()
-            if txt == "":
-                print("Please enter a number or Ctrl+C to exit.")
-                continue
-        try:
-            return float(txt)
-        except ValueError:
-            print("Not a valid number, try again.")
-
-
-def ask_yes_no(prompt, default=0):
-    """Ask for yes/no, return 1 or 0. Empty = default."""
-    default_str = "y" if default == 1 else "n"
-    txt = input(f"{prompt} [y/n, default {default_str}]: ").strip().lower()
-    if txt == "":
-        return int(default)
-    if txt in ["y", "yes"]:
-        return 1
-    if txt in ["n", "no"]:
-        return 0
-    print("Input not understood, using default.")
-    return int(default)
-
-
-def interactive_ui(
-    model,
-    team_to_id,
-    fav_to_id,
-    abbr_to_team_name,
-    team_default_stadium_id,
-    feature_cols,
-    feature_medians,
-    default_season,
-):
-    """
-    Simple text UI: user enters teams and (optionally) other parameters.
-    Blank inputs use reasonable defaults.
-    """
-    print("\n" + "=" * 60)
-    print("        NFL GAME PREDICTOR (TABULAR ML, PYTHON EDITION)")
-    print("=" * 60)
-    print("Tips:")
-    print("  - Use team abbreviations like: BUF, KC, NE, DAL, SF")
-    print("  - Press Enter to skip optional fields (use defaults)")
-    print("  - Ctrl+C to quit at any time.\n")
-
-    # Show which abbreviations we know
-    known_abbrs = sorted(abbr_to_team_name.keys())
-    if known_abbrs:
-        print("Known team abbreviations (from dataset):")
-        print(", ".join(known_abbrs))
-        print()
-
-    while True:
-        print("-" * 60)
-        print("Enter game details:")
-
-        # Home / away are REQUIRED (but still allow abbreviation or full name)
-        home = ask_str("Home team (abbr or full name)", default=None).upper()
-        away = ask_str("Away team (abbr or full name)", default=None).upper()
-
-        # Season, week, etc.
-        season = ask_int("Season (year)", default=default_season)
-        week_num = ask_int("Week number", default=8)
-        is_playoff = ask_yes_no("Is this a playoff game?", default=0)
-
-        # Month & day-of-week
-        # If user skips, use typical defaults (Nov, Sunday)
-        game_month = ask_int("Game month (1-12)", default=11)
-        game_dow = ask_int("Day of week (0=Mon ... 6=Sun)", default=6)
-
-        # Spread / total
-        median_spread = round(feature_medians["spread_favorite"], 1)
-        median_ou = round(feature_medians["over_under_line"], 1)
-        spread = ask_float(
-            "Spread for FAVORITE (home negative, away positive)",
-            default=median_spread,
-        )
-        ou_total = ask_float("Over/under total points", default=median_ou)
-
-        # Favorite team (optional). Default: home team.
-        default_fav = home
-        fav_team = ask_str(
-            "Favorite team abbreviation (or leave blank for home)",
-            default=default_fav,
-        ).upper()
-
-        # Weather
-        median_temp = round(feature_medians["weather_temperature"], 1)
-        median_wind = round(feature_medians["weather_wind_mph"], 1)
-        median_humid = round(feature_medians["weather_humidity"], 1)
-
-        temp_f = ask_float("Temperature (F)", default=median_temp)
-        wind_mph = ask_float("Wind speed (mph)", default=median_wind)
-        humidity = ask_float("Humidity (%)", default=median_humid)
-
-        is_indoor = ask_yes_no("Is this game indoors / in a dome?", default=0)
-        is_rain = ask_yes_no("Is it raining?", default=0)
-        is_snow = ask_yes_no("Is it snowing?", default=0)
-
-        try:
-            winner, prob = predict_game(
-                model=model,
-                team_to_id=team_to_id,
-                fav_to_id=fav_to_id,
-                abbr_to_team_name=abbr_to_team_name,
-                team_default_stadium_id=team_default_stadium_id,
-                feature_cols=feature_cols,
-                feature_medians=feature_medians,
-                season=season,
-                week_num=week_num,
-                is_playoff=is_playoff,
-                game_month=game_month,
-                game_dow=game_dow,
-                home_team_code=home,
-                away_team_code=away,
-                favorite_team_abbr=fav_team,
-                spread_favorite=spread,
-                over_under_line=ou_total,
-                temp_f=temp_f,
-                wind_mph=wind_mph,
-                humidity=humidity,
-                is_indoor=is_indoor,
-                is_rain=is_rain,
-                is_snow=is_snow,
-            )
-
-            print("\n" + "-" * 60)
-            print(f"Prediction for {away} @ {home}")
-            print("-" * 60)
-            print(f"  Predicted winner       : {winner}")
-            print(f"  Home win probability   : {prob:.3f}")
-            print(f"  Away win probability   : {1.0 - prob:.3f}")
-            print("-" * 60 + "\n")
-
-        except KeyError as e:
-            print(f"\n[ERROR] {e}")
-            print("Make sure you used a known abbreviation or full team name.\n")
-
-        # Ask if user wants another prediction
-        again = ask_yes_no("Run another prediction?", default=1)
-        if not again:
-            print("\nExiting NFL predictor. Goodbye!\n")
-            break
-
-
-# ---------------------------------------------------------
-# 5. Main
-# ---------------------------------------------------------
+# =========================================================
+# MAIN
+# =========================================================
 
 def main():
     print(f"Loading raw CSV from: {RAW_CSV}")
-    df = pd.read_csv(RAW_CSV)
-    (
-        cleaned,
-        team_to_id,
-        fav_to_id,
-        abbr_to_team_name,
-        team_default_stadium_id,
-        feature_cols,
-        feature_medians,
-        default_season,
-    ) = clean_for_model(df)
+    raw_df = pd.read_csv(RAW_CSV)
+
+    cleaned, team_to_id, stadium_to_id = clean_for_model(raw_df)
     print("Cleaned shape:", cleaned.shape)
 
-    best_model = train_models(cleaned, feature_cols)
+    best_model, feature_order, scaler_for_best, best_name = train_models(cleaned)
 
-    # Start interactive UI
-    interactive_ui(
-        best_model,
-        team_to_id,
-        fav_to_id,
-        abbr_to_team_name,
-        team_default_stadium_id,
-        feature_cols,
-        feature_medians,
-        default_season,
+    # Favorite-team ID map (abbr -> id)
+    fav_abbrs = sorted(
+        v for v in raw_df["team_favorite_id"].dropna().unique()
+        if v not in ["PICK", "PK"]
     )
+    favorite_abbr_to_id = {abbr: i + 1 for i, abbr in enumerate(fav_abbrs)}
+
+    # For mapping user input -> canonical team name
+    team_name_lookup = build_team_name_lookup(raw_df)
+    default_season = int(cleaned["schedule_season"].max())
+
+    user_inputs = prompt_for_game_details(
+        team_name_lookup=team_name_lookup,
+        team_to_id=team_to_id,
+        default_season=default_season,
+    )
+
+    predicted_home_win, home_win_proba = predict_game(
+        best_model,
+        user_inputs=user_inputs,
+        team_to_id=team_to_id,
+        favorite_abbr_to_id=favorite_abbr_to_id,
+        stadium_to_id=stadium_to_id,
+        feature_order=feature_order,
+        scaler_for_best=scaler_for_best,
+    )
+
+    home_label = f"{user_inputs['home_abbr']} ({user_inputs['home_full']})"
+    away_label = f"{user_inputs['away_abbr']} ({user_inputs['away_full']})"
+    winner_label = home_label if predicted_home_win else away_label
+
+    print("\n==================== PREDICTION RESULT ====================")
+    print(f"Model used : {best_name}")
+    print(f"Matchup    : {home_label}  vs  {away_label}")
+    print(
+        f"Season     : {user_inputs['season']}   "
+        f"Week: {user_inputs['week_num']}   "
+        f"Playoff: {'Yes' if user_inputs['is_playoff'] else 'No'}"
+    )
+    print(f"Spread     : {user_inputs['spread_fav']}  (favorite: {user_inputs['favorite_abbr']})")
+    print(f"O/U Total  : {user_inputs['over_under']}")
+    print(
+        f"Weather    : {user_inputs['weather_temperature']} F, "
+        f"{user_inputs['weather_wind_mph']} mph wind, "
+        f"{user_inputs['weather_humidity']}% humidity"
+    )
+    print(
+        "Conditions : "
+        f"{'Indoor' if user_inputs['is_indoor'] else 'Outdoor'}, "
+        f"{'Rain' if user_inputs['is_rain'] else 'No rain'}, "
+        f"{'Snow' if user_inputs['is_snow'] else 'No snow'}"
+    )
+    print("-----------------------------------------------------------")
+    print(f"🏈 Predicted winner : {winner_label}")
+    print(f"🏠 Home win prob    : {home_win_proba:.3%}")
+    print("===========================================================\n")
 
 
 if __name__ == "__main__":
