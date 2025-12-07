@@ -1,107 +1,122 @@
-# 🏈 NFL-PredictER
+# 🏈 NFL Game Predictor
 
-A machine learning project that predicts NFL game outcomes (home win probability) using:
+A clean, modern React web application for predicting NFL game outcomes using machine learning.
 
-- Historical game + betting data (spread, O/U)
-- Weather conditions (live WeatherAPI integration)
-- Team IDs and matchup context
-- Game metadata (week, month, playoff flag)
-- Logistic Regression (scaled)
-- Random Forest (raw features)
-- Automatic model selection (best model by accuracy)
+## Features
 
-You can enter any matchup and get:
+✅ **Game Prediction** - Predict NFL game winners with probability scores  
+✅ **Live Weather Integration** - Automatic weather fetching for game locations  
+✅ **Model Refresh** - Download latest data from Kaggle and retrain model  
+✅ **Modern UI** - Beautiful, responsive React interface  
+✅ **Easy to Run** - Simple local setup  
 
-- Predicted winner  
-- Home win probability  
-- Spread & O/U context  
-- Weather summary  
-- Full game context  
+## Quick Start
 
----
+### 1. Install Dependencies
 
-## 🚀 Features
+**Python (Backend):**
+```bash
+pip install -r requirements.txt
+```
 
-### ✔ Automatic Data Cleaning
+**Node.js (Frontend):**
+```bash
+npm install
+```
 
-The script loads `spreadspoke_scores.csv`, cleans it, and generates features such as:
+### 2. Set Up Kaggle (Optional - for model refresh feature)
 
-- Week number (regular season + playoffs)
-- Home/away team IDs
-- Favorite team ID
-- Point spread & implied team points
-- Over/under total
-- Weather features (temperature, wind, humidity, rain/snow flags)
-- Game metadata (season, month, day of week, playoff flag)
-- Stadium ID and neutral-field flag
+**Recommended Method - API Token:**
+1. Go to [Kaggle Account Settings](https://www.kaggle.com/settings)
+2. Scroll to "API" section and click "Create New Token"
+3. Copy the API token (starts with `KGAT_`)
+4. Set environment variable:
+   - **Windows**: `set KAGGLE_API_TOKEN=your_token_here`
+   - **Linux/Mac**: `export KAGGLE_API_TOKEN=your_token_here`
 
-The target label is:
+See `KAGGLE_SETUP.md` for detailed instructions.
 
-- `home_win` — 1 if home team won, 0 otherwise
+### 3. Run the Application
 
----
+You need **two terminal windows**:
 
-### ✔ Two ML Models + Automatic Selection
+**Terminal 1 - Start Flask Backend:**
+```bash
+python app.py
+```
+You should see: `Running on http://127.0.0.1:5000`
 
-The script trains and compares:
+**Terminal 2 - Start React Frontend:**
+```bash
+npm run dev
+```
+You should see: `Ready on http://localhost:3000`
 
-1. **Logistic Regression**
-   - Uses `StandardScaler` (scaled features)
-   - Higher `max_iter` for cleaner convergence
-2. **Random Forest**
-   - Uses raw numeric features
-   - Typically performs better on this dataset
+### 4. Open in Browser
 
-After training, it prints a comparison table and automatically chooses the best model (by accuracy). That model is then used for predictions in the interactive UI.
+Navigate to: **http://localhost:3000**
 
----
+**Note**: The model trains automatically on startup from `spreadspoke_scores.csv`. If the file doesn't exist, click "🔄 Refresh Model" to download from Kaggle.
 
-## 🌤 Live WeatherAPI Integration
+## Usage
 
-The project integrates with [WeatherAPI.com](https://www.weatherapi.com/) to automatically pull **current weather** for the home team’s city.
+1. **Select Teams**: Choose home and away teams from dropdowns
+2. **Weather**: Weather automatically fetches when you select a home team
+3. **Enter Game Details**: Season, week, spread, over/under, etc.
+4. **Make Prediction**: Click "Make Prediction" to get ML-powered prediction
+5. **Refresh Model**: Click "🔄 Refresh Model" to download latest data from Kaggle and retrain
 
-When you enter a matchup:
+## Project Structure
 
-1. Home team abbreviation → mapped to a city (e.g., `DET` → `Detroit,MI`)
-2. The script calls the WeatherAPI `/current.json` endpoint
-3. It fills:
-   - Temperature (°F)
-   - Wind speed (mph)
-   - Humidity (%)
-   - Rain / snow flags (derived from the text conditions)
-4. Indoor teams (dome stadiums) default to `"y"` for indoor games, but you can override
+```
+nfl-predicter/
+├── app.py                 # Flask backend API
+├── pages/
+│   ├── index.tsx         # Main React frontend
+│   └── _app.tsx          # Next.js app wrapper
+├── styles/
+│   └── globals.css       # Global styles
+├── package.json          # Node.js dependencies
+├── requirements.txt     # Python dependencies
+└── spreadspoke_scores.csv # Training data (optional)
+```
 
-If the API call fails, the script falls back to manual input for weather fields.
+## API Endpoints
 
----
+- `GET /api/weather?team=TEAM_ABBR` - Fetch weather for team city
+- `POST /api/predict` - Make game prediction
+- `POST /api/refresh_model` - Download from Kaggle and retrain model
 
-## 🧠 Interactive Prediction UI
+## Environment Variables (Optional)
 
-After training, the script prompts you to enter game details:
+- `WEATHERAPI_KEY` - WeatherAPI.com key (default key included)
+- `KAGGLE_USERNAME` - Your Kaggle username
+- `KAGGLE_KEY` - Your Kaggle API key
 
-- Home team (abbreviation or full name)
-- Away team (abbreviation or full name)
-- Season (year)
-- Week number
-- Whether it’s a playoff game
-- Spread for the favorite (home negative, away positive)
-- Over/under total points
-- Favorite team abbreviation (optional; defaults to home)
-- Weather (auto-fetched, but you can override)
-- Indoor / rain / snow flags
+## Troubleshooting
 
-Then it prints a clean, formatted summary, for example:
+**Backend not starting:**
+- Make sure port 5000 is available
+- Check Python dependencies are installed
 
-```text
-==================== PREDICTION RESULT ====================
-Model used : RandomForest
-Matchup    : DET (Detroit Lions)  vs  DAL (Dallas Cowboys)
-Season     : 2025   Week: 14   Playoff: No
-Spread     : -4.5  (favorite: DET)
-O/U Total  : 42.0
-Weather    : 28.0 F, 10.3 mph wind, 69.0% humidity
-Conditions : Indoor, No rain, No snow
------------------------------------------------------------
-🏈 Predicted winner : DET (Detroit Lions)
-🏠 Home win prob    : 53.221%
-===========================================================
+**Frontend not connecting:**
+- Ensure Flask backend is running on port 5000
+- Check browser console for CORS errors
+
+**Model refresh fails:**
+- If you see a "403" or "permission" error, you need to set up Kaggle API credentials
+- See `KAGGLE_SETUP.md` for detailed instructions
+- **Alternative**: Place `spreadspoke_scores.csv` in the project directory - the app will automatically use it as a fallback
+- The app will use the local CSV file if Kaggle authentication fails
+
+## Technologies
+
+- **Frontend**: React, Next.js, TypeScript
+- **Backend**: Flask, Python
+- **ML**: Scikit-learn (Random Forest, Logistic Regression)
+- **Weather**: WeatherAPI.com
+- **Data**: Kaggle (tonycorona/nfl-spreadspoke-scores)
+
+## License
+
+MIT

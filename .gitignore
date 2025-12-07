@@ -1,23 +1,55 @@
-# Python Virtual Environments
-venv/
-.venv/
-env/
+# Dependencies
+node_modules/
+/.pnp
+.pnp.js
 
-# Python compiled files
-__pycache__/
-*.pyc
+# Testing
+/coverage
 
-# Operating System Files
+# Next.js
+/.next/
+/out/
+
+# Production
+/build
+
+# Misc
 .DS_Store
-Thumbs.db
+*.pem
 
-# Large Data & Machine Learning Artifacts
-*.pkl
-*.json
-model.h5
-*.csv # <-- WARNING: Uncomment this ONLY if you keep your CSVs outside of Git. 
-      # Since you uploaded your data, keep this line commented out if you want 
-      # to keep tracking the stats files.
+# Debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
-# Environment Secrets
+# Local env files
+.env*.local
 .env
+
+# Vercel
+.vercel
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# Model files
+/tmp/
+*.joblib
+*.pkl
+
+# Data files (users should download from Kaggle or use local copy)
+spreadspoke_scores.csv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
